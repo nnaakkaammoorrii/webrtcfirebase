@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WebRTC Firebase</title>
+</head>
+
+<body>
+    <p id="status"></p>
+    <video id="remoteVideo" autoplay playsinline></video>
+    <video id="localVideo" height="200" autoplay playsinline muted></video><!-- Fix 3 -->
+    
+    <input type="text" id="toUser" />
+    <button id="button1">📞</button>
+
+    <!-- The core Firebase JS SDK is always required and must be listed first -->
+    <script src="https://www.gstatic.com/firebasejs/6.0.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/6.0.0/firebase-database.js"></script>
+
+    <!-- TODO: Add SDKs for Firebase products that you want to use
+     https://firebase.google.com/docs/web/setup#config-web-app -->
+
+    <script>
+navigator.getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+
+var userName = prompt('ユーザ名を入力してください', '');
+var loginTime = new Date().getTime();
+
+var firebaseConfig = {
+    apiKey: "AIzaSyB9s3Uw-AdhSQI9Qd4kE4AeNvFdE-wEzVE",
+    authDomain: "webrtc-firebase-a27ee.firebaseapp.com",
+    databaseURL: "https://webrtc-firebase-a27ee.firebaseio.com",
+    projectId: "webrtc-firebase-a27ee",
+    storageBucket: "webrtc-firebase-a27ee.appspot.com",
+    messagingSenderId: "864942885973",
+    appId: "1:864942885973:web:4def384606245985"
+};
+// Initialize Firebase
+firebase.initializeApp(firebaseConfig);
+
+var elmRemoteVideo = document.getElementById('remoteVideo');
+var elmLocalVideo = document.getElementById('localVideo');
+var elmStatus = document.getElementById('status'); // 発信中とか着信中とか出そうかと思ったけど面倒なので未使用
+
+var callKey = null;
+var callUpdates = {};
+var acceptKey = null;
+var acceptUpdates = {};
+
+navigator.getUserMedia({
+        audio: true,
+        video: true
+    },
+    mediaStream => {
+        // videoタグに映像を映す
+        elmLocalVideo.srcObject = mediaStream;
+        // ピアにメディアストリームを設定する
+        peer.addStream(mediaStream);
+    },
+    error =>  {
+        console.log(error.name + ': ' + error.message);
+        alert("メディアストリームの取得に失敗しました:" + error.message);
+    }
+);
+
+var myCandidate = [];
+var peer = new RTCPeerConnection({
+    "iceServers": [{"urls": "stun:stun.l.google.com:19302"}] // Fix 1
+});
+peer.onicecandidate = event => {
+    if (event.candidate) {
+        console.log('onicecandidate', event.candidate);
+        myCandidate.push(event.candidate);
+    }
+};
+peer.onaddstream = mediaStream => {
+    remoteVideo.srcObject = mediaStream.stream;
+};
+
+firebase.database().ref(`/users/${userName}/call`).on('child_added' ,data => {
+    var call = data.val();
+    if (call.time < loginTime) {
+        console.log('old call');
+        return;
+    }
+    
+    console.log('call', call);
+    
+    var sdp = new RTCSessionDescription(JSON.parse(call.sdp));
+    // Fix 2
+    peer.setRemoteDescription(sdp).then(() => {
+        peer.createAnswer().then(sdp => {
+            peer.setLocalDescription(sdp, () => {
+                acceptKey = firebase.database().ref(`/users/${call.from}`).child('accept').push().key;
+                acceptUpdates = {};
+                acceptUpdates['/accept/' + acceptKey] = {
+                    to: userName,
+                    time: new Date().getTime(),
+                    sdp: JSON.stringify(sdp)
+                };
+                firebase.database().ref(`/users/${call.from}`).update(acceptUpdates);
+            },
+            error => {
+                console.log(error.message);
+            });
+        }).catch(error => {
+            console.log(error.message)
+        });
+    });
+});
+firebase.database().ref(`/users/${userName}/call`).on('child_changed', data => {
+    var call = data.val();
+    if (call.time < loginTime) {
+        console.log('old call');
+        return;
+    }
+    
+    console.log('call update', call);
+    
+    var remoteCandidates = JSON.parse(call.candidate);
+    for(var remoteCandidate of remoteCandidates) {
+        var candidate = new RTCIceCandidate(remoteCandidate);
+        peer.addIceCandidate(candidate);
+    }
+    
+    console.log('addIceCandidate');
+    
+    acceptUpdates['/accept/' + acceptKey].candidate = JSON.stringify(myCandidate);
+    firebase.database().ref(`/users/${call.from}`).update(acceptUpdates);
+});
+
+firebase.database().ref(`/users/${userName}/accept`).on('child_added' ,data => {
+    var accept = data.val();
+    if (accept.time < loginTime) {
+        console.log('old accept');
+        return;
+    }
+    
+    console.log('accept', accept);
+    
+    var sdp = new RTCSessionDescription(JSON.parse(accept.sdp));
+    peer.setRemoteDescription(sdp, () => {
+        console.log('setRemoteDescription');
+        
+        callUpdates['/call/' + callKey].candidate = JSON.stringify(myCandidate);
+        firebase.database().ref(`/users/${accept.to}`).update(callUpdates);
+    },
+    error => {
+        console.log(error.message);
+    });
+});
+firebase.database().ref(`/users/${userName}/accept`).on('child_changed', data => {
+    var accept = data.val();
+    if (accept.time < loginTime) {
+        console.log('old accept');
+        return;
+    }
+    
+    console.log('accept update', accept);
+    
+    var remoteCandidates = JSON.parse(accept.candidate);
+    for(var remoteCandidate of remoteCandidates) {
+        var candidate = new RTCIceCandidate(remoteCandidate);
+        peer.addIceCandidate(candidate);
+    }
+});
+
+document.getElementById('button1').onclick = () => {
+    var target = document.getElementById('toUser').value;
+    if (target.length == 0) {
+        alert('ユーザー名を入力してください');
+        return;
+    }
+    console.log(target);
+
+    peer.createOffer(sdp => {
+            console.log('createOffer', sdp);
+            peer.setLocalDescription(sdp,
+                () => {
+                    console.log('setLocalDescription');
+                    callKey = firebase.database().ref(`/users/${target}`).child('call').push().key;
+                    callUpdates = {};
+                    callUpdates['/call/' + callKey] = {
+                        from: userName,
+                        time: new Date().getTime(),
+                        sdp: JSON.stringify(sdp)
+                    };
+                    firebase.database().ref(`/users/${target}`).update(callUpdates);
+                },
+                error => {
+                    console.log(error.message);
+                }
+            );
+        },
+        error => {
+            console.log(error)
+        }
+    );
+};
+    </script>
+</body>
+
+</html>
